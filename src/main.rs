@@ -1,10 +1,11 @@
 use std::env;
-use std::error::Error;
 use std::io::Read;
 use std::fs::File;
+use termios::*;
+
 use lc3vm;
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() {
     let args: Vec<String> = env::args().collect();
     println!("Args: {:?}", args);
     let mut f = File::open(&args[1]).expect("File not found.");
@@ -30,10 +31,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    
+    const STDIN_FILENO:i32 = 0;
 
+    // Disable terminal input buffering
+    let termios = termios::Termios::from_fd(STDIN_FILENO).unwrap();
+    let mut new_termios = termios.clone();
+    new_termios.c_iflag &= IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON;
+    new_termios.c_lflag &= !(ICANON | ECHO); // no echo and canonical mode
+    tcsetattr(STDIN_FILENO, TCSANOW, &mut new_termios).unwrap();
+
+    // Create VM and run
     let mut vm = lc3vm::VM::new();
     vm.load(&memory);
     vm.run();
 
-    Ok(())
+    // reset stdin to original settings
+    tcsetattr(STDIN_FILENO, TCSANOW, &termios).unwrap();
 }

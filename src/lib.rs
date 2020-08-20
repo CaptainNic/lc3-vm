@@ -1,5 +1,5 @@
-use libc::c_int;
-use nix::sys::select::*;
+use nix::sys::select::{select, FdSet};
+use nix::sys::time::{TimeVal, TimeValLike};
 use std::io::Read;
 
 pub struct VM {
@@ -31,7 +31,9 @@ impl Memory {
       MMR_KBSR => {
         if self.check_key() {
           self.mem[MMR_KBSR] = 1 << 15;
-          self.mem[MMR_KBDR] = unsafe { getchar() } as u16;
+          self.mem[MMR_KBDR] = self.get_char();
+        } else {
+          self.mem[MMR_KBSR] = 0;
         }
         self.mem[addr]
       },
@@ -42,12 +44,24 @@ impl Memory {
   }
 
   fn check_key(&self) -> bool {
+    const STDIN_FILENO: i32 = 0;
+
     let mut fd = FdSet::new();
-    fd.insert(libc::STDIN_FILENO);
-    match select(1, &mut fd, None, None, None) {
+    fd.insert(STDIN_FILENO);
+
+    match select(None, &mut fd, None, None, &mut TimeVal::zero()) {
+      Ok(value) => value == 1,
       Err(_) => false,
-      _ => true,
     }
+  }
+
+  fn get_char(&self) -> u16 {
+    let mut buffer = [0; 1];
+    std::io::stdin()
+      .read_exact(&mut buffer)
+      .expect("unable to read from stdin");
+
+    u16::from(buffer[0])
   }
 }
 
@@ -57,23 +71,28 @@ const FL_ZRO: u16 = 1 << 1; // Zero
 const FL_NEG: u16 = 1 << 2; // Negative
 
 // Memory Mapped Registers
+// TODO: other MMR's
 const MMR_KBSR: usize = 0xFE00; // keyboard status register
 const MMR_KBDR: usize = 0xFE02; // keyboard data register
 
 // Register ID's
 const R_R0:    usize =  0;
+#[allow(unused)]
 const R_R1:    usize =  1;
+#[allow(unused)]
 const R_R2:    usize =  2;
+#[allow(unused)]
 const R_R3:    usize =  3;
+#[allow(unused)]
 const R_R4:    usize =  4;
+#[allow(unused)]
 const R_R5:    usize =  5;
+#[allow(unused)]
 const R_R6:    usize =  6;
 const R_R7:    usize =  7;
 const R_PC:    usize =  8;
 const R_COND:  usize =  9;
 const R_COUNT: usize = 10;
-
-const PC_START: u16 = 0x3000;
 
 #[derive(Debug)]
 enum OpCode {
@@ -148,7 +167,7 @@ fn sign_extend(x: u16, bits: usize) -> u16 {
   match x >> (bits - 1) == 1 {
     true => { x | (0xFFFF << bits) },
     false => { x }
-  } 
+  }
 }
 
 impl VM {
@@ -176,34 +195,39 @@ impl VM {
   }
 
   pub fn run(&mut self) {
-
-    self.reg[R_PC] = PC_START;
-    
+    // Begin execution
     self.running = true;
     while self.running {
       // Fetch instruction
       let instr = self.memory.read(self.reg[R_PC] as usize);
       print!("PC: 0x{:4X}\t", self.reg[R_PC]);
-      self.reg[R_PC] += 1;
+      self.reg[R_PC] = self.reg[R_PC].wrapping_add(1);
 
       let op = OpCode::from_instr(instr).unwrap();
-      std::thread::sleep_ms(1000);
-      println!("{:?}", op);
+      // std::thread::sleep_ms(100);
       match op {
         OpCode::ADD => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   dr   |  sr1   | 0| 0  0|  sr2   |
           // |  op code  |   dr   |  sr1   | 1|     imm5     |
-          let dr:usize  = (instr >> 9 & 0b111) as usize;
-          let sr1:usize = (instr >> 6 & 0b111) as usize;
-          match instr >> 5 & 0b1 {
+          let dr:usize  = ((instr >> 9) & 0b111) as usize;
+          let sr1:usize = ((instr >> 6) & 0b111) as usize;
+          match (instr >> 5) & 0b1 {
             0 => {
               let sr2 = (instr & 0b111) as usize;
-              self.reg[dr] = self.reg[sr1] + self.reg[sr2];
+              self.reg[dr] = self.reg[sr1].wrapping_add(self.reg[sr2]);
+              println!("ADD\tR{} R{} R{} (0x{:X} + 0x{:X} = 0x{:X})",
+                dr, sr1, sr1,
+                self.reg[sr1],
+                self.reg[sr2],
+                self.reg[sr1].wrapping_add(self.reg[sr2]));
             },
             1 => {
               let imm5 = sign_extend(instr & 0x1F, 5);
-              self.reg[dr] = self.reg[sr1] + imm5;
+              self.reg[dr] = self.reg[sr1].wrapping_add(imm5);
+              println!("ADD\tR{} R{} 0x{:X} (0x{:X} + 0x{:X} = 0x{:X})",
+                dr, sr1, imm5,
+                self.reg[sr1], imm5, self.reg[sr1].wrapping_add(imm5));
             }
             _ => () // appease compiler
           }
@@ -214,11 +238,11 @@ impl VM {
           // |  op code  |   dr   |  sr1   | 0| 0  0|  sr2   |
           // |  op code  |   dr   |  sr1   | 1|     imm5     |
           print!("AND\t");
-          let dr:usize  = (instr >> 9 & 0b111) as usize;
+          let dr:usize  = ((instr >> 9) & 0b111) as usize;
           print!("R{}\t", dr);
-          let sr1:usize = (instr >> 6 & 0b111) as usize;
+          let sr1:usize = ((instr >> 6) & 0b111) as usize;
           print!("R{}\t", dr);
-          match instr >> 5 & 0b1 {
+          match (instr >> 5) & 0b1 {
             0 => {
               let sr2 = (instr & 0b111) as usize;
               println!("R{}\t", dr);
@@ -237,23 +261,23 @@ impl VM {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  | n| z| p|         PCoffset9        |
           print!("BR");
-          let flags:u16 = instr >>  9 & 0b111;
+          let flags:u16 = (instr >> 9) & 0b111;
           if flags >> 2 == 1 { print!("n") }
           if flags >> 1 == 1 { print!("z") }
           if flags >> 0 == 1 { print!("p") }
 
-          let offset = instr & 0x1FF;
-          println!(" {:X}", offset);
+          let offset = sign_extend(instr & 0x1FF, 9);
+          println!(" 0x{:X}", offset);
           // BR is equivalent to BRnzp, it always branches
           if flags == 0 || self.reg[R_COND] & flags != 0 {
-            self.reg[R_PC] = sign_extend(offset, 9);
+            self.reg[R_PC] = self.reg[R_PC].wrapping_add(offset);
           }
         },
         OpCode::JMP => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   000  | BaseR  |      000000     | JMP
           // |  op code  |   000  |   000  |      000000     | RET
-          let base_reg:usize  = (instr >> 6 & 0b111) as usize;
+          let base_reg:usize  = ((instr >> 6) & 0b111) as usize;
           match base_reg {
             0 => {
               println!("RET");
@@ -280,14 +304,14 @@ impl VM {
           match jump_to_reg {
             false => {
               // JSR - jump to PCoffset11
-              let addr = instr & 0x7FF;
-              println!("JSR {:3X}", addr);
-              self.reg[R_PC] = addr;
+              let offset = sign_extend(instr & 0x7FF, 11);
+              println!("JSR\t0x{:X}", offset);
+              self.reg[R_PC] = self.reg[R_PC].wrapping_add(offset);
             },
             true => {
               // JSRR - jump to BaseR
-              let base_reg = (instr >> 6 & 0b111) as usize;
-              println!("JSRR R{}", base_reg);
+              let base_reg = ((instr >> 6) & 0b111) as usize;
+              println!("JSRR\tR{} (0x{:X})", base_reg, self.reg[base_reg]);
               self.reg[R_PC] = self.reg[base_reg];
             }
           }
@@ -295,49 +319,49 @@ impl VM {
         OpCode::LD => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   dr   |         PCoffset9        |
-          let dr:usize = (instr >> 9 & 0b111) as usize;
+          let dr:usize = ((instr >> 9) & 0b111) as usize;
           let offset = sign_extend(instr & 0x01FF, 9);
-          let addr = (self.reg[R_PC] + sign_extend(offset, 9)) as usize;
+          let addr = self.reg[R_PC].wrapping_add(offset) as usize;
           self.reg[dr] = self.memory.read(addr);
           self.update_flags(dr);
-          println!("LD\tR{} {:3X}", dr, offset);
+          println!("LD\tR{} 0x{:X} (0x{:X})", dr, offset, addr);
         },
         OpCode::LDI => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   dr   |         PCoffset9        |
-          let dr:usize = (instr >> 9 & 0b111) as usize;
+          let dr:usize = ((instr >> 9) & 0b111) as usize;
           let offset = sign_extend(instr & 0x01FF, 9);
-          let addr = (self.reg[R_PC] + offset) as usize;
+          let addr = self.reg[R_PC].wrapping_add(offset) as usize;
           let indirect_addr = self.memory.read(addr) as usize;
           self.reg[dr] = self.memory.read(indirect_addr);
           self.update_flags(dr);
-          println!("LDI\tR{} {:3X}", dr, offset);
+          println!("LDI\tR{} 0x{:X}", dr, offset);
         },
         OpCode::LDR => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   dr   |  baseR |     offset6     |
-          let dr = (instr >> 9 & 0b111) as usize;
-          let base_reg = (instr >> 6 & 0b111) as usize;
-          let offset = instr & 0x3F;
-          let addr = (self.reg[base_reg] + sign_extend(offset, 6)) as usize;
+          let dr = ((instr >> 9) & 0b111) as usize;
+          let base_reg = ((instr >> 6) & 0b111) as usize;
+          let offset = sign_extend(instr & 0x3F, 6);
+          let addr = self.reg[base_reg].wrapping_add(offset) as usize;
           self.reg[dr] = self.memory.read(addr);
           self.update_flags(dr);
-          println!("LDR\tR{} R{} {:2X}", dr, base_reg, offset);
+          println!("LDR\tR{} R{} 0x{:X}", dr, base_reg, offset);
         },
         OpCode::LEA => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   dr   |        PCoffset9         |
-          let dr = (instr >> 9 & 0b111) as usize;
+          let dr = ((instr >> 9) & 0b111) as usize;
           let offset = sign_extend(instr & 0x1FF, 9);
-          self.reg[dr] = self.reg[R_PC] + offset;
+          self.reg[dr] = self.reg[R_PC].wrapping_add(offset);
           self.update_flags(dr);
-          println!("LDI\tR{} {:3X}", dr, offset);
+          println!("LEA\tR{} 0x{:X}", dr, offset);
         },
         OpCode::NOT => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   dr   |   sr   | 1|     11111    |
-          let dr = (instr >> 9 & 0b111) as usize;
-          let sr = (instr >> 6 & 0b111) as usize;
+          let dr = ((instr >> 9) & 0b111) as usize;
+          let sr = ((instr >> 6) & 0b111) as usize;
           self.reg[dr] = !self.reg[sr];
           self.update_flags(dr);
           println!("NOT\tR{} R{}", dr, sr);
@@ -357,44 +381,45 @@ impl VM {
             else
               Initiate a privilege mode exception;
           */
-          println!("RTI instruction not implemented. Aborting.");
+          println!("RTI\tinstruction not implemented. Aborting.");
           self.running = false;
         },
         OpCode::ST => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   sr   |        PCoffset9         |
-          let sr = (instr >> 9 & 0b111) as usize;
+          let sr = ((instr >> 9) & 0b111) as usize;
           let offset = sign_extend(instr & 0x1FF, 9);
-          let addr = (self.reg[R_PC] + offset) as usize;
+          let addr = self.reg[R_PC].wrapping_add(offset) as usize;
           self.memory.write(addr, self.reg[sr]);
-          println!("ST\tR{} {:3X}", sr, offset);
+          println!("ST\tR{} 0x{:X}", sr, offset);
         },
         OpCode::STI => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   sr   |        PCoffset9         |
-          let sr = (instr >> 9 & 0b111) as usize;
+          let sr = ((instr >> 9) & 0b111) as usize;
           let offset = sign_extend(instr & 0x1FF, 9);
-          let addr = (self.reg[R_PC] + offset) as usize;
+          let addr = self.reg[R_PC].wrapping_add(offset) as usize;
           let indirect_addr = self.memory.read(addr) as usize;
           self.memory.write(indirect_addr, self.reg[sr]);
-          println!("STI\tR{} {:3X}", sr, offset);
+          println!("STI\tR{} 0x{:X}", sr, offset);
         },
         OpCode::STR => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   sr   | baseR  |     offset6     |
-          let sr = (instr >> 9 & 0b111) as usize;
-          let base_reg = (instr >> 6 & 0b111) as usize;
-          let offset = sign_extend(instr & 0x7F, 6);
-          let addr = (self.reg[base_reg] + offset) as usize;
+          let sr = ((instr >> 9) & 0b111) as usize;
+          let base_reg = ((instr >> 6) & 0b111) as usize;
+          let offset = sign_extend(instr & 0x3F, 6);
+          let addr = self.reg[base_reg].wrapping_add(offset) as usize;
           self.memory.write(addr, self.reg[sr]);
-          println!("STR\tR{} R{} {:2X}", sr, base_reg, offset);
+          println!("STR\tR{} R{} 0x{:X}", sr, base_reg, offset);
         },
         OpCode::TRAP => {
           // |15|14|13|12|11|10| 9| 8| 7| 6| 5| 4| 3| 2| 1| 0|
           // |  op code  |   0000    |       trapvect8       |
           let trapvect8 = (instr & 0xFF) as u8;
+          print!("TRAP\t0x{:X}", trapvect8);
           let trap = TrapCode::from_trapvect8(trapvect8).unwrap();
-          println!("TRAP {:?}", trap);
+          println!("\t{:?}", trap);
           self.execute_trap(trap);
         },
         OpCode::RES => {
@@ -473,8 +498,4 @@ impl VM {
       },
     }
   }
-}
-
-extern "C" {
-  fn getchar() -> c_int;
 }

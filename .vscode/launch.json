@@ -1,0 +1,63 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'lc3vm'",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=lc3vm",
+          "--package=lc3vm"
+        ],
+        "filter": {
+          "name": "lc3vm",
+          "kind": "bin"
+        }
+      },
+      "args": [
+        "test-programs/2048.obj"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in library 'lc3vm'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--lib",
+          "--package=lc3vm"
+        ],
+        "filter": {
+          "name": "lc3vm",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in executable 'lc3vm'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--bin=lc3vm",
+          "--package=lc3vm"
+        ],
+        "filter": {
+          "name": "lc3vm",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
